@@ -3,8 +3,8 @@ import json
 import sqlite3
 import random
 import string
-from telegram import Update, InputMediaVideo
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update, InputMediaVideo, InputMediaPhoto
+from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, filters
 
 # -----------------------
 # CONFIG
@@ -21,7 +21,8 @@ cursor = conn.cursor()
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS media_groups (
     code TEXT PRIMARY KEY,
-    file_ids TEXT
+    file_ids TEXT,
+    types TEXT
 )
 ''')
 conn.commit()
@@ -31,18 +32,23 @@ conn.commit()
 def generate_code(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
-def save_media_group(file_ids):
+def save_media_group(file_ids, types):
     code = generate_code()
-    cursor.execute("INSERT INTO media_groups (code, file_ids) VALUES (?, ?)", (code, json.dumps(file_ids)))
+    cursor.execute(
+        "INSERT INTO media_groups (code, file_ids, types) VALUES (?, ?, ?)",
+        (code, json.dumps(file_ids), json.dumps(types))
+    )
     conn.commit()
     return code
 
 def get_media_group(code):
-    cursor.execute("SELECT file_ids FROM media_groups WHERE code=?", (code,))
+    cursor.execute("SELECT file_ids, types FROM media_groups WHERE code=?", (code,))
     row = cursor.fetchone()
     if row:
-        return json.loads(row[0])
-    return []
+        file_ids = json.loads(row[0])
+        types = json.loads(row[1])
+        return file_ids, types
+    return [], []
 
 # -----------------------
 # HANDLERS
@@ -50,9 +56,14 @@ def start(update: Update, context: CallbackContext):
     args = context.args
     if args:
         code = args[0]
-        file_ids = get_media_group(code)
+        file_ids, types = get_media_group(code)
         if file_ids:
-            media = [InputMediaVideo(fid) for fid in file_ids]
+            media = []
+            for fid, ftype in zip(file_ids, types):
+                if ftype == "video":
+                    media.append(InputMediaVideo(fid))
+                elif ftype == "photo":
+                    media.append(InputMediaPhoto(fid))
             context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
         else:
             update.message.reply_text("Mã không hợp lệ hoặc hết hạn.")
@@ -62,21 +73,23 @@ def start(update: Update, context: CallbackContext):
 def handle_media(update: Update, context: CallbackContext):
     if update.message.from_user.id not in ADMIN_IDS:
         return  # Không phải admin
+
     file_ids = []
+    types = []
 
-    # Nếu là MediaGroup (nhiều video)
-    if update.message.media_group_id:
-        # Lấy tất cả message cùng media_group_id
-        chat_id = update.effective_chat.id
-        messages = context.bot.get_chat(chat_id).get_history(limit=10)  # giới hạn 10 message gần đây
-        for msg in messages:
-            if getattr(msg, 'media_group_id', None) == update.message.media_group_id and msg.video:
-                file_ids.append(msg.video.file_id)
-    elif update.message.video:
+    # Nếu gửi video
+    if update.message.video:
         file_ids.append(update.message.video.file_id)
+        types.append("video")
+    # Nếu gửi ảnh
+    if update.message.photo:
+        # Telegram gửi ảnh dưới dạng list, lấy file_id lớn nhất
+        file_ids.append(update.message.photo[-1].file_id)
+        types.append("photo")
 
+    # Nếu gửi media group, PTB sẽ gọi handle_media cho từng message riêng
     if file_ids:
-        code = save_media_group(file_ids)
+        code = save_media_group(file_ids, types)
         update.message.reply_text(
             f"Upload thành công! Link nhận file: https://t.me/{context.bot.username}?start={code}"
         )
@@ -87,7 +100,7 @@ updater = Updater(BOT_TOKEN)
 dp = updater.dispatcher
 
 dp.add_handler(CommandHandler("start", start))
-dp.add_handler(MessageHandler(Filters.video | Filters.media_group, handle_media))
+dp.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
 
 print("Bot đang chạy…")
 updater.start_polling()
