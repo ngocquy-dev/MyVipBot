@@ -3,24 +3,25 @@ import json
 import sqlite3
 import random
 import string
+from telegram import Update, InputMediaVideo, InputMediaPhoto
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackContext, filters
+)
 from dotenv import load_dotenv
-from telegram import Update, InputMediaPhoto, InputMediaVideo
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackContext, filters
 
 # -----------------------
-# LOAD ENV
+# LOAD CONFIG
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
-if not BOT_TOKEN or not ADMIN_IDS:
-    raise ValueError("BOT_TOKEN hoặc ADMIN_IDS chưa thiết lập đúng trong .env!")
+DB_PATH = "database.db"
 
 # -----------------------
 # DATABASE
-DB_PATH = "database.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
+
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS media_group (
     admin_id INTEGER PRIMARY KEY,
@@ -40,6 +41,7 @@ def save_or_append_media(admin_id, new_file_ids, new_types):
     cursor.execute("SELECT code, file_ids, types FROM media_group WHERE admin_id=?", (admin_id,))
     row = cursor.fetchone()
     if row:
+        # admin đã có code → append file mới
         code, file_ids_json, types_json = row
         file_ids = json.loads(file_ids_json)
         types = json.loads(types_json)
@@ -52,6 +54,7 @@ def save_or_append_media(admin_id, new_file_ids, new_types):
         conn.commit()
         return code
     else:
+        # admin chưa có code → tạo code mới
         code = generate_code()
         cursor.execute(
             "INSERT INTO media_group (admin_id, code, file_ids, types) VALUES (?, ?, ?, ?)",
@@ -77,7 +80,7 @@ async def start(update: Update, context: CallbackContext):
         code = args[0]
         file_ids, types = get_media_group_by_code(code)
         if file_ids:
-            # Telegram media group gửi tối đa 10 file 1 lần
+            # Gửi media group theo chunks 10 file (Telegram max)
             for i in range(0, len(file_ids), 10):
                 media = []
                 for fid, ftype in zip(file_ids[i:i+10], types[i:i+10]):
@@ -89,15 +92,12 @@ async def start(update: Update, context: CallbackContext):
         else:
             await update.message.reply_text("Mã không hợp lệ hoặc chưa có file nào.")
     else:
-        await update.message.reply_text(
-            "Chào bạn! Admin upload file sẽ nhận 1 link duy nhất. User bấm link để nhận tất cả file."
-        )
+        await update.message.reply_text("Chào bạn! Gửi link rút gọn với mã để nhận file.")
 
 async def handle_media(update: Update, context: CallbackContext):
-    admin_id = update.message.from_user.id
-    if admin_id not in ADMIN_IDS:
-        await update.message.reply_text("Bạn không có quyền upload file.")
-        return
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return  # Không phải admin
 
     new_file_ids = []
     new_types = []
@@ -107,21 +107,21 @@ async def handle_media(update: Update, context: CallbackContext):
         new_file_ids.append(update.message.video.file_id)
         new_types.append("video")
 
-    # Ảnh
+    # Photo
     if update.message.photo:
-        for photo in update.message.photo:
-            new_file_ids.append(photo.file_id)
-            new_types.append("photo")
+        new_file_ids.append(update.message.photo[-1].file_id)  # lấy file lớn nhất
+        new_types.append("photo")
 
     if new_file_ids:
-        code = save_or_append_media(admin_id, new_file_ids, new_types)
+        code = save_or_append_media(user_id, new_file_ids, new_types)
         await update.message.reply_text(
-            f"Upload thành công! Link duy nhất: https://t.me/{context.bot.username}?start={code}"
+            f"Upload thành công! Link nhận file: https://t.me/{context.bot.username}?start={code}"
         )
 
 # -----------------------
 # MAIN
 app = ApplicationBuilder().token(BOT_TOKEN).build()
+
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
 
