@@ -1,0 +1,14 @@
+# Thư mục upload tạm
+uploads/
+
+# Database SQLite
+database.db
+
+# File cấu hình chứa token
+.env
+
+# Thư mục __pycache__ của Python
+__pycache__/
+
+# File log nếu có
+*.log
