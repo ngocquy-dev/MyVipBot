@@ -1,129 +1,150 @@
-import os
-import json
 import sqlite3
-import random
-import string
-from telegram import Update, InputMediaVideo, InputMediaPhoto
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackContext, filters
-)
-from dotenv import load_dotenv
+import uuid
+from telegram import Update, InputMediaPhoto, InputMediaVideo
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-# -----------------------
-# LOAD CONFIG
-load_dotenv()
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+# -------------------------------
+# CONFIG
+# -------------------------------
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+ADMIN_ID = 123456789   # Thay bằng ID Telegram của bạn
 
-DB_PATH = "database.db"
-
-# -----------------------
+# -------------------------------
 # DATABASE
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute('''
-CREATE TABLE IF NOT EXISTS media_group (
-    admin_id INTEGER PRIMARY KEY,
-    code TEXT,
-    file_ids TEXT,
-    types TEXT
-)
-''')
-conn.commit()
-
-# -----------------------
-# HELPERS
-def generate_code(length=8):
-    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
-
-def save_or_append_media(admin_id, new_file_ids, new_types):
-    cursor.execute("SELECT code, file_ids, types FROM media_group WHERE admin_id=?", (admin_id,))
-    row = cursor.fetchone()
-    if row:
-        # admin đã có code → append file mới
-        code, file_ids_json, types_json = row
-        file_ids = json.loads(file_ids_json)
-        types = json.loads(types_json)
-        file_ids.extend(new_file_ids)
-        types.extend(new_types)
-        cursor.execute(
-            "UPDATE media_group SET file_ids=?, types=? WHERE admin_id=?",
-            (json.dumps(file_ids), json.dumps(types), admin_id)
+# -------------------------------
+def init_db():
+    conn = sqlite3.connect("files.db")
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS batches (
+            code TEXT PRIMARY KEY,
+            files TEXT
         )
-        conn.commit()
-        return code
-    else:
-        # admin chưa có code → tạo code mới
-        code = generate_code()
-        cursor.execute(
-            "INSERT INTO media_group (admin_id, code, file_ids, types) VALUES (?, ?, ?, ?)",
-            (admin_id, code, json.dumps(new_file_ids), json.dumps(new_types))
-        )
-        conn.commit()
-        return code
+    """)
+    conn.commit()
+    conn.close()
 
-def get_media_group_by_code(code):
-    cursor.execute("SELECT file_ids, types FROM media_group WHERE code=?", (code,))
-    row = cursor.fetchone()
+init_db()
+
+# Lưu batch vào DB
+def save_batch(code, files):
+    conn = sqlite3.connect("files.db")
+    c = conn.cursor()
+    c.execute("INSERT INTO batches (code, files) VALUES (?,?)", (code, ",".join(files)))
+    conn.commit()
+    conn.close()
+
+# Lấy batch từ DB
+def get_batch(code):
+    conn = sqlite3.connect("files.db")
+    c = conn.cursor()
+    c.execute("SELECT files FROM batches WHERE code=?", (code,))
+    row = c.fetchone()
+    conn.close()
+
     if row:
-        file_ids = json.loads(row[0])
-        types = json.loads(row[1])
-        return file_ids, types
-    return [], []
+        return row[0].split(",")
+    return None
 
-# -----------------------
-# HANDLERS
-async def start(update: Update, context: CallbackContext):
+# -------------------------------
+# BỘ NHỚ TẠM THỜI CHO ADMIN
+# -------------------------------
+admin_files = {}  # { admin_id : [file_ids] }
+
+# -------------------------------
+# COMMAND: /start
+# -------------------------------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
+
+    # Nếu user bấm link start kèm code
     if args:
         code = args[0]
-        file_ids, types = get_media_group_by_code(code)
-        if file_ids:
-            # Gửi media group theo chunks 10 file (Telegram max)
-            for i in range(0, len(file_ids), 10):
-                media = []
-                for fid, ftype in zip(file_ids[i:i+10], types[i:i+10]):
-                    if ftype == "video":
-                        media.append(InputMediaVideo(fid))
-                    elif ftype == "photo":
-                        media.append(InputMediaPhoto(fid))
-                await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
+        files = get_batch(code)
+        if not files:
+            await update.message.reply_text("Link không hợp lệ hoặc đã hết hạn!")
+            return
+
+        # Trả về tất cả file
+        media = []
+        for f in files:
+            if f.startswith("photo_"):
+                media.append(InputMediaPhoto(f.replace("photo_", "")))
+            else:
+                media.append(InputMediaVideo(f.replace("video_", "")))
+
+        if len(media) == 1:
+            if media[0].type == "photo":
+                await update.message.reply_photo(media[0].media)
+            else:
+                await update.message.reply_video(media[0].media)
         else:
-            await update.message.reply_text("Mã không hợp lệ hoặc chưa có file nào.")
-    else:
-        await update.message.reply_text("Chào bạn! Gửi link rút gọn với mã để nhận file.")
+            await update.message.reply_media_group(media)
 
-async def handle_media(update: Update, context: CallbackContext):
-    user_id = update.message.from_user.id
-    if user_id not in ADMIN_IDS:
-        return  # Không phải admin
+        return
 
-    new_file_ids = []
-    new_types = []
+    # Nếu user bấm start bình thường
+    await update.message.reply_text("Chào bạn! Gửi link hợp lệ để nhận files.")
 
-    # Video
-    if update.message.video:
-        new_file_ids.append(update.message.video.file_id)
-        new_types.append("video")
+# -------------------------------
+# NHẬN FILE (CHỈ ADMIN)
+# -------------------------------
+async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("Bạn không có quyền upload files!")
+        return
 
-    # Photo
+    file_id = None
+
     if update.message.photo:
-        new_file_ids.append(update.message.photo[-1].file_id)  # lấy file lớn nhất
-        new_types.append("photo")
+        file_id = "photo_" + update.message.photo[-1].file_id
 
-    if new_file_ids:
-        code = save_or_append_media(user_id, new_file_ids, new_types)
-        await update.message.reply_text(
-            f"Upload thành công! Link nhận file: https://t.me/{context.bot.username}?start={code}"
-        )
+    elif update.message.video:
+        file_id = "video_" + update.message.video.file_id
 
-# -----------------------
+    else:
+        await update.message.reply_text("Chỉ hỗ trợ ảnh và video!")
+        return
+
+    # Thêm file vào bộ nhớ tạm của admin
+    admin_files.setdefault(ADMIN_ID, []).append(file_id)
+
+    await update.message.reply_text("Đã nhận file! Gõ /done khi upload xong.")
+
+# -------------------------------
+# /done – tạo 1 link duy nhất
+# -------------------------------
+async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.from_user.id != ADMIN_ID:
+        await update.message.reply_text("Bạn không có quyền dùng lệnh này!")
+        return
+
+    files = admin_files.get(ADMIN_ID, [])
+
+    if len(files) == 0:
+        await update.message.reply_text("Bạn chưa upload file nào!")
+        return
+
+    # Tạo mã duy nhất
+    code = uuid.uuid4().hex[:8]
+
+    # Lưu vào DB
+    save_batch(code, files)
+
+    # Reset danh sách để tránh dồn file
+    admin_files[ADMIN_ID] = []
+
+    link = f"https://t.me/{context.bot.username}?start={code}"
+
+    await update.message.reply_text(f"Upload hoàn tất!\nLink nhận files: {link}")
+
+# -------------------------------
 # MAIN
+# -------------------------------
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
+app.add_handler(CommandHandler("done", done))
+app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, receive_file))
 
-print("Bot đang chạy…")
 app.run_polling()
