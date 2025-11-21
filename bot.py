@@ -4,7 +4,7 @@ import sqlite3
 import random
 import string
 from dotenv import load_dotenv
-from telegram import Update, InputMediaVideo, InputMediaPhoto
+from telegram import Update, InputMediaPhoto, InputMediaVideo
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler, CallbackContext, filters
 )
@@ -82,12 +82,12 @@ async def handle_media(update: Update, context: CallbackContext):
     file_ids = []
     types = []
 
-    # Nếu gửi video
+    # Lấy video
     if update.message.video:
         file_ids.append(update.message.video.file_id)
         types.append("video")
 
-    # Nếu gửi nhiều ảnh
+    # Lấy nhiều ảnh
     if update.message.photo:
         for photo in update.message.photo:
             file_ids.append(photo.file_id)
@@ -104,7 +104,7 @@ async def handle_media(update: Update, context: CallbackContext):
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
+app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, handle_media))
 
 print("Bot đang chạy…")
 app.run_polling()
