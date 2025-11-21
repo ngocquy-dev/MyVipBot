@@ -3,21 +3,26 @@ import json
 import sqlite3
 import random
 import string
+from dotenv import load_dotenv
 from telegram import Update, InputMediaVideo, InputMediaPhoto
-from telegram.ext import Updater, CommandHandler, MessageHandler, CallbackContext, filters
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackContext, filters
+)
 
 # -----------------------
-# CONFIG
+# LOAD ENV
+load_dotenv()  # load các biến từ .env
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",")]
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
-DB_PATH = "database.db"
+if not BOT_TOKEN or not ADMIN_IDS:
+    raise ValueError("BOT_TOKEN hoặc ADMIN_IDS chưa được thiết lập đúng trong .env!")
 
 # -----------------------
 # DATABASE
+DB_PATH = "database.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
-
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS media_groups (
     code TEXT PRIMARY KEY,
@@ -52,7 +57,7 @@ def get_media_group(code):
 
 # -----------------------
 # HANDLERS
-def start(update: Update, context: CallbackContext):
+async def start(update: Update, context: CallbackContext):
     args = context.args
     if args:
         code = args[0]
@@ -64,13 +69,13 @@ def start(update: Update, context: CallbackContext):
                     media.append(InputMediaVideo(fid))
                 elif ftype == "photo":
                     media.append(InputMediaPhoto(fid))
-            context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
+            await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
         else:
-            update.message.reply_text("Mã không hợp lệ hoặc hết hạn.")
+            await update.message.reply_text("Mã không hợp lệ hoặc hết hạn.")
     else:
-        update.message.reply_text("Chào bạn! Gửi link rút gọn với mã để nhận file.")
+        await update.message.reply_text("Chào bạn! Gửi link rút gọn với mã để nhận file.")
 
-def handle_media(update: Update, context: CallbackContext):
+async def handle_media(update: Update, context: CallbackContext):
     if update.message.from_user.id not in ADMIN_IDS:
         return  # Không phải admin
 
@@ -81,27 +86,26 @@ def handle_media(update: Update, context: CallbackContext):
     if update.message.video:
         file_ids.append(update.message.video.file_id)
         types.append("video")
-    # Nếu gửi ảnh
+    # Nếu gửi nhiều ảnh
     if update.message.photo:
-        # Telegram gửi ảnh dưới dạng list, lấy file_id lớn nhất
-        file_ids.append(update.message.photo[-1].file_id)
-        types.append("photo")
+        for photo in update.message.photo:
+            file_ids.append(photo.file_id)
+            types.append("photo")
 
-    # Nếu gửi media group, PTB sẽ gọi handle_media cho từng message riêng
     if file_ids:
         code = save_media_group(file_ids, types)
-        update.message.reply_text(
+        await update.message.reply_text(
             f"Upload thành công! Link nhận file: https://t.me/{context.bot.username}?start={code}"
         )
 
 # -----------------------
 # MAIN
-updater = Updater(BOT_TOKEN)
-dp = updater.dispatcher
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-dp.add_handler(CommandHandler("start", start))
-dp.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
+# Command /start
+app.add_handler(CommandHandler("start", start))
+# Nhận video + ảnh
+app.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
 
 print("Bot đang chạy…")
-updater.start_polling()
-updater.idle()
+app.run_polling()
