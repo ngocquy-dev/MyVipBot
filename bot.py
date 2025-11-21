@@ -23,7 +23,8 @@ conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS media_group (
-    code TEXT PRIMARY KEY,
+    admin_id INTEGER PRIMARY KEY,
+    code TEXT,
     file_ids TEXT,
     types TEXT
 )
@@ -35,33 +36,31 @@ conn.commit()
 def generate_code(length=8):
     return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
 
-def save_or_append_media(file_ids, types):
-    """
-    Nếu đã có code (admin chỉ 1 code duy nhất) -> append
-    Nếu chưa -> tạo code mới
-    """
-    cursor.execute("SELECT code, file_ids, types FROM media_group LIMIT 1")
+def save_or_append_media(admin_id, new_file_ids, new_types):
+    cursor.execute("SELECT code, file_ids, types FROM media_group WHERE admin_id=?", (admin_id,))
     row = cursor.fetchone()
     if row:
-        code, existing_file_ids, existing_types = row[0], json.loads(row[1]), json.loads(row[2])
-        existing_file_ids.extend(file_ids)
-        existing_types.extend(types)
+        code, file_ids_json, types_json = row
+        file_ids = json.loads(file_ids_json)
+        types = json.loads(types_json)
+        file_ids.extend(new_file_ids)
+        types.extend(new_types)
         cursor.execute(
-            "UPDATE media_group SET file_ids=?, types=? WHERE code=?",
-            (json.dumps(existing_file_ids), json.dumps(existing_types), code)
+            "UPDATE media_group SET file_ids=?, types=? WHERE admin_id=?",
+            (json.dumps(file_ids), json.dumps(types), admin_id)
         )
         conn.commit()
         return code
     else:
         code = generate_code()
         cursor.execute(
-            "INSERT INTO media_group (code, file_ids, types) VALUES (?, ?, ?)",
-            (code, json.dumps(file_ids), json.dumps(types))
+            "INSERT INTO media_group (admin_id, code, file_ids, types) VALUES (?, ?, ?, ?)",
+            (admin_id, code, json.dumps(new_file_ids), json.dumps(new_types))
         )
         conn.commit()
         return code
 
-def get_media_group(code):
+def get_media_group_by_code(code):
     cursor.execute("SELECT file_ids, types FROM media_group WHERE code=?", (code,))
     row = cursor.fetchone()
     if row:
@@ -76,9 +75,9 @@ async def start(update: Update, context: CallbackContext):
     args = context.args
     if args:
         code = args[0]
-        file_ids, types = get_media_group(code)
+        file_ids, types = get_media_group_by_code(code)
         if file_ids:
-            # Telegram media group chỉ gửi max 10 file 1 lần
+            # Telegram media group gửi tối đa 10 file 1 lần
             for i in range(0, len(file_ids), 10):
                 media = []
                 for fid, ftype in zip(file_ids[i:i+10], types[i:i+10]):
@@ -90,29 +89,32 @@ async def start(update: Update, context: CallbackContext):
         else:
             await update.message.reply_text("Mã không hợp lệ hoặc chưa có file nào.")
     else:
-        await update.message.reply_text("Chào bạn! Admin upload file sẽ nhận 1 link duy nhất. User bấm link để nhận file.")
+        await update.message.reply_text(
+            "Chào bạn! Admin upload file sẽ nhận 1 link duy nhất. User bấm link để nhận tất cả file."
+        )
 
 async def handle_media(update: Update, context: CallbackContext):
-    if update.message.from_user.id not in ADMIN_IDS:
+    admin_id = update.message.from_user.id
+    if admin_id not in ADMIN_IDS:
         await update.message.reply_text("Bạn không có quyền upload file.")
         return
 
-    file_ids = []
-    types = []
+    new_file_ids = []
+    new_types = []
 
-    # Lấy video
+    # Video
     if update.message.video:
-        file_ids.append(update.message.video.file_id)
-        types.append("video")
+        new_file_ids.append(update.message.video.file_id)
+        new_types.append("video")
 
-    # Lấy tất cả ảnh
+    # Ảnh
     if update.message.photo:
         for photo in update.message.photo:
-            file_ids.append(photo.file_id)
-            types.append("photo")
+            new_file_ids.append(photo.file_id)
+            new_types.append("photo")
 
-    if file_ids:
-        code = save_or_append_media(file_ids, types)
+    if new_file_ids:
+        code = save_or_append_media(admin_id, new_file_ids, new_types)
         await update.message.reply_text(
             f"Upload thành công! Link duy nhất: https://t.me/{context.bot.username}?start={code}"
         )
