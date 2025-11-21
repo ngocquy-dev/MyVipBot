@@ -11,12 +11,12 @@ from telegram.ext import (
 
 # -----------------------
 # LOAD ENV
-load_dotenv()  # load các biến từ .env
+load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
 if not BOT_TOKEN or not ADMIN_IDS:
-    raise ValueError("BOT_TOKEN hoặc ADMIN_IDS chưa được thiết lập đúng trong .env!")
+    raise ValueError("BOT_TOKEN hoặc ADMIN_IDS chưa thiết lập đúng trong .env!")
 
 # -----------------------
 # DATABASE
@@ -86,6 +86,7 @@ async def handle_media(update: Update, context: CallbackContext):
     if update.message.video:
         file_ids.append(update.message.video.file_id)
         types.append("video")
+
     # Nếu gửi nhiều ảnh
     if update.message.photo:
         for photo in update.message.photo:
@@ -102,9 +103,7 @@ async def handle_media(update: Update, context: CallbackContext):
 # MAIN
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# Command /start
 app.add_handler(CommandHandler("start", start))
-# Nhận video + ảnh
 app.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
 
 print("Bot đang chạy…")
