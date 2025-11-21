@@ -1,150 +1,128 @@
+import os
+import json
 import sqlite3
-import uuid
+import random
+import string
 from telegram import Update, InputMediaPhoto, InputMediaVideo
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+)
+from dotenv import load_dotenv
 
-# -------------------------------
-# CONFIG
-# -------------------------------
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-ADMIN_ID = 123456789   # Thay bằng ID Telegram của bạn
+# -----------------------
+# LOAD ENV
+load_dotenv()
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 
-# -------------------------------
+# -----------------------
 # DATABASE
-# -------------------------------
-def init_db():
-    conn = sqlite3.connect("files.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS batches (
-            code TEXT PRIMARY KEY,
-            files TEXT
-        )
-    """)
+DB_PATH = "database.db"
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+cursor = conn.cursor()
+
+# Lưu các nhóm media
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS media_groups (
+    code TEXT PRIMARY KEY,
+    file_ids TEXT,
+    types TEXT
+)
+''')
+conn.commit()
+
+# Lưu tạm files trước khi /done
+temp_uploads = {}  # {admin_id: {"file_ids": [], "types": []}}
+
+# -----------------------
+# HELPERS
+def generate_code(length=8):
+    return ''.join(random.choices(string.ascii_letters + string.digits, k=length))
+
+def save_media_group(file_ids, types):
+    code = generate_code()
+    cursor.execute(
+        "INSERT INTO media_groups (code, file_ids, types) VALUES (?, ?, ?)",
+        (code, json.dumps(file_ids), json.dumps(types))
+    )
     conn.commit()
-    conn.close()
+    return code
 
-init_db()
-
-# Lưu batch vào DB
-def save_batch(code, files):
-    conn = sqlite3.connect("files.db")
-    c = conn.cursor()
-    c.execute("INSERT INTO batches (code, files) VALUES (?,?)", (code, ",".join(files)))
-    conn.commit()
-    conn.close()
-
-# Lấy batch từ DB
-def get_batch(code):
-    conn = sqlite3.connect("files.db")
-    c = conn.cursor()
-    c.execute("SELECT files FROM batches WHERE code=?", (code,))
-    row = c.fetchone()
-    conn.close()
-
+def get_media_group(code):
+    cursor.execute("SELECT file_ids, types FROM media_groups WHERE code=?", (code,))
+    row = cursor.fetchone()
     if row:
-        return row[0].split(",")
-    return None
+        file_ids = json.loads(row[0])
+        types = json.loads(row[1])
+        return file_ids, types
+    return [], []
 
-# -------------------------------
-# BỘ NHỚ TẠM THỜI CHO ADMIN
-# -------------------------------
-admin_files = {}  # { admin_id : [file_ids] }
-
-# -------------------------------
-# COMMAND: /start
-# -------------------------------
+# -----------------------
+# HANDLERS
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
-
-    # Nếu user bấm link start kèm code
     if args:
         code = args[0]
-        files = get_batch(code)
-        if not files:
-            await update.message.reply_text("Link không hợp lệ hoặc đã hết hạn!")
-            return
-
-        # Trả về tất cả file
-        media = []
-        for f in files:
-            if f.startswith("photo_"):
-                media.append(InputMediaPhoto(f.replace("photo_", "")))
-            else:
-                media.append(InputMediaVideo(f.replace("video_", "")))
-
-        if len(media) == 1:
-            if media[0].type == "photo":
-                await update.message.reply_photo(media[0].media)
-            else:
-                await update.message.reply_video(media[0].media)
+        file_ids, types = get_media_group(code)
+        if file_ids:
+            media = []
+            for fid, ftype in zip(file_ids, types):
+                if ftype == "video":
+                    media.append(InputMediaVideo(fid))
+                elif ftype == "photo":
+                    media.append(InputMediaPhoto(fid))
+            await context.bot.send_media_group(chat_id=update.effective_chat.id, media=media)
         else:
-            await update.message.reply_media_group(media)
-
-        return
-
-    # Nếu user bấm start bình thường
-    await update.message.reply_text("Chào bạn! Gửi link hợp lệ để nhận files.")
-
-# -------------------------------
-# NHẬN FILE (CHỈ ADMIN)
-# -------------------------------
-async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Bạn không có quyền upload files!")
-        return
-
-    file_id = None
-
-    if update.message.photo:
-        file_id = "photo_" + update.message.photo[-1].file_id
-
-    elif update.message.video:
-        file_id = "video_" + update.message.video.file_id
-
+            await update.message.reply_text("Mã không hợp lệ hoặc đã hết hạn.")
     else:
-        await update.message.reply_text("Chỉ hỗ trợ ảnh và video!")
-        return
+        await update.message.reply_text("Chào bạn! Nếu bạn là admin, gửi file rồi dùng /done để tạo link. Người dùng bấm link sẽ nhận tất cả file.")
 
-    # Thêm file vào bộ nhớ tạm của admin
-    admin_files.setdefault(ADMIN_ID, []).append(file_id)
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_IDS:
+        return  # Không phải admin
 
-    await update.message.reply_text("Đã nhận file! Gõ /done khi upload xong.")
+    if user_id not in temp_uploads:
+        temp_uploads[user_id] = {"file_ids": [], "types": []}
 
-# -------------------------------
-# /done – tạo 1 link duy nhất
-# -------------------------------
+    # Video
+    if update.message.video:
+        temp_uploads[user_id]["file_ids"].append(update.message.video.file_id)
+        temp_uploads[user_id]["types"].append("video")
+    # Photo
+    if update.message.photo:
+        temp_uploads[user_id]["file_ids"].append(update.message.photo[-1].file_id)
+        temp_uploads[user_id]["types"].append("photo")
+
+    await update.message.reply_text("File được lưu tạm, gửi tiếp hoặc dùng /done để tạo link.")
+
 async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.message.from_user.id != ADMIN_ID:
-        await update.message.reply_text("Bạn không có quyền dùng lệnh này!")
+    user_id = update.message.from_user.id
+    if user_id not in ADMIN_IDS:
         return
 
-    files = admin_files.get(ADMIN_ID, [])
-
-    if len(files) == 0:
-        await update.message.reply_text("Bạn chưa upload file nào!")
+    if user_id not in temp_uploads or not temp_uploads[user_id]["file_ids"]:
+        await update.message.reply_text("Không có file nào để tạo link.")
         return
 
-    # Tạo mã duy nhất
-    code = uuid.uuid4().hex[:8]
+    file_ids = temp_uploads[user_id]["file_ids"]
+    types = temp_uploads[user_id]["types"]
 
-    # Lưu vào DB
-    save_batch(code, files)
+    code = save_media_group(file_ids, types)
+    await update.message.reply_text(
+        f"Upload hoàn tất! Link nhận file: https://t.me/{context.bot.username}?start={code}"
+    )
 
-    # Reset danh sách để tránh dồn file
-    admin_files[ADMIN_ID] = []
+    # Xóa tạm
+    temp_uploads[user_id] = {"file_ids": [], "types": []}
 
-    link = f"https://t.me/{context.bot.username}?start={code}"
-
-    await update.message.reply_text(f"Upload hoàn tất!\nLink nhận files: {link}")
-
-# -------------------------------
+# -----------------------
 # MAIN
-# -------------------------------
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("done", done))
-app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, receive_file))
+app.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
 
+print("Bot đang chạy…")
 app.run_polling()
