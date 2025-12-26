@@ -1,3 +1,5 @@
+from flask import Flask
+import threading
 import os
 import json
 import sqlite3
@@ -117,6 +119,19 @@ async def done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     temp_uploads[user_id] = {"file_ids": [], "types": []}
 
 # -----------------------
+# -----------------------
+# KEEP ALIVE (Replit)
+web_app = Flask(__name__)
+
+@web_app.route("/")
+def home():
+    return "Bot is running"
+
+def run_web():
+    web_app.run(host="0.0.0.0", port=8080)
+
+threading.Thread(target=run_web, daemon=True).start()
+
 # MAIN
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -124,5 +139,6 @@ app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("done", done))
 app.add_handler(MessageHandler(filters.VIDEO | filters.PHOTO, handle_media))
 
-print("Bot đang chạy…")
-app.run_polling()
+if __name__ == "__main__":
+    print("Bot đang chạy…")
+    app.run_polling(close_loop=False)
