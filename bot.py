@@ -128,7 +128,9 @@ def home():
     return "Bot is running"
 
 def run_web():
-    web_app.run(host="0.0.0.0", port=8080)
+    port = int(os.environ.get("PORT", 5000))
+    web_app.run(host="0.0.0.0", port=port)
+
 
 threading.Thread(target=run_web, daemon=True).start()
 
